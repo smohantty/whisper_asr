@@ -97,11 +97,34 @@ audiostreamer_lib = static_library('audiostreamer',
   install : false
 )
 
+# Build the WhisperBackend library
+whisperbackend_lib = static_library('whisperbackend',
+  'WhisperBackend.cpp',
+  dependencies : [whisper_dep, threads_dep],
+  install : false
+)
+
 # Build the livestream ASR test application
 livestream_asr = executable('livestream_asr',
   'livestream_asr.cpp',
   dependencies : [whisper_dep, threads_dep],
-  link_with : audiostreamer_lib,
+  link_with : [audiostreamer_lib, whisperbackend_lib],
+  install : true
+)
+
+# Build the WhisperBackend example application
+example_whisper_backend = executable('example_whisper_backend',
+  'example_whisper_backend.cpp',
+  dependencies : [whisper_dep, threads_dep],
+  link_with : [audiostreamer_lib, whisperbackend_lib],
+  install : true
+)
+
+# Build the language switching demo application
+language_switching_demo = executable('language_switching_demo',
+  'language_switching_demo.cpp',
+  dependencies : [whisper_dep, threads_dep],
+  link_with : whisperbackend_lib,
   install : true
 )
 
@@ -132,7 +155,7 @@ endif
 # Print build summary
 message('')
 message('=== Whisper Test Applications Build ===')
-message('Targets: test_whisper, livestream_asr')
+message('Targets: test_whisper, livestream_asr, example_whisper_backend, language_switching_demo')
 message('Language: C++17')
 message('Build type: ' + get_option('buildtype'))
 message('Install: ' + get_option('prefix'))
@@ -141,9 +164,19 @@ message('Usage after build:')
 message('  cd builddir')
 message('  ./test_whisper [model_path] [audio_path]')
 message('  ./livestream_asr [model_path]')
+message('  ./example_whisper_backend [base_model_path]')
+message('  ./language_switching_demo [base_model_path]')
 message('')
-message('Note: livestream_asr requires:')
+message('Note: livestream applications require:')
 message('  - Working microphone')
 message('  - arecord utility (ALSA tools)')
 message('  - Model file (e.g., ggml-small.en.bin)')
+message('')
+message('WhisperBackend API Features:')
+message('  - Live streaming ASR with callback interface')
+message('  - Multi-language support (English/Korean)')
+message('  - Runtime language switching')
+message('  - Internal audio queue and worker thread')
+message('  - Speech tag handling (Start/Continue/End)')
+message('  - Thread-safe audio processing')
 message('')
