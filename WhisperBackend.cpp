@@ -568,7 +568,7 @@ private:
     bool mCurrentlyAccumulating;               // Track if we're accumulating for a chunk
 
     // Pre-allocated buffer for audio processing (avoid vector creation)
-    mutable std::vector<float> mProcessBuffer; // Reusable buffer for prepareAudioWithContext
+    std::vector<float> mProcessBuffer; // Reusable buffer for prepareAudioWithContext
 };
 
 // WhisperBackend public interface implementation
