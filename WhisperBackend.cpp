@@ -18,98 +18,98 @@ namespace asr {
 class WhisperBackend::Impl {
 public:
     Impl(const std::string& baseModelPath, Language language, AsrEventCallback callback)
-        : base_model_path_(baseModelPath)
-        , use_custom_models_(false)
-        , current_language_(language)
-        , callback_(std::move(callback))
-        , running_(false)
-        , ctx_(nullptr)
-        , sample_rate_(16000)
-        , last_partial_result_("")
+        : mBaseModelPath(baseModelPath)
+        , mUseCustomModels(false)
+        , mCurrentLanguage(language)
+        , mCallback(std::move(callback))
+        , mRunning(false)
+        , mCtx(nullptr)
+        , mSampleRate(16000)
+        , mLastPartialResult("")
     {
         initializeWhisper();
     }
 
     Impl(const std::map<Language, std::string>& languageModels, Language language, AsrEventCallback callback)
-        : custom_language_models_(languageModels)
-        , use_custom_models_(true)
-        , current_language_(language)
-        , callback_(std::move(callback))
-        , running_(false)
-        , ctx_(nullptr)
-        , sample_rate_(16000)
-        , last_partial_result_("")
+        : mCustomLanguageModels(languageModels)
+        , mUseCustomModels(true)
+        , mCurrentLanguage(language)
+        , mCallback(std::move(callback))
+        , mRunning(false)
+        , mCtx(nullptr)
+        , mSampleRate(16000)
+        , mLastPartialResult("")
     {
         initializeWhisper();
     }
 
     ~Impl() {
         stop();
-        if (ctx_) {
-            whisper_free(ctx_);
+        if (mCtx) {
+            whisper_free(mCtx);
         }
     }
 
     void processAudio(const std::vector<float>& audio, SpeechTag speechTag) {
-        if (!running_ || !ctx_) {
+        if (!mRunning || !mCtx) {
             return;
         }
 
         // Process each chunk immediately - no accumulation
         {
-            std::lock_guard<std::mutex> lock(queue_mutex_);
+            std::lock_guard<std::mutex> lock(mQueueMutex);
 
             // Always queue the chunk for immediate processing
             if (!audio.empty()) {
-                audio_queue_.push({audio, speechTag});
-                queue_condition_.notify_one();
+                mAudioQueue.push({audio, speechTag});
+                mQueueCondition.notify_one();
             } else if (speechTag == SpeechTag::End) {
                 // Even with empty audio, process End tag to signal completion
-                audio_queue_.push({audio, speechTag});
-                queue_condition_.notify_one();
+                mAudioQueue.push({audio, speechTag});
+                mQueueCondition.notify_one();
             }
         }
     }
 
     void start() {
-        if (running_ || !ctx_) {
+        if (mRunning || !mCtx) {
             return;
         }
 
-        running_ = true;
-        worker_thread_ = std::thread(&Impl::workerLoop, this);
+        mRunning = true;
+        mWorkerThread = std::thread(&Impl::workerLoop, this);
     }
 
     void stop() {
-        running_ = false;
+        mRunning = false;
 
         // Notify worker thread to wake up and exit
-        queue_condition_.notify_all();
+        mQueueCondition.notify_all();
 
-        if (worker_thread_.joinable()) {
-            worker_thread_.join();
+        if (mWorkerThread.joinable()) {
+            mWorkerThread.join();
         }
     }
 
     bool setLanguage(Language language) {
-        if (language == current_language_) {
+        if (language == mCurrentLanguage) {
             return true;  // Already using the requested language
         }
 
         // Stop processing temporarily
-        bool was_running = running_;
+        bool was_running = mRunning;
         if (was_running) {
             stop();
         }
 
         // Unload current model
-        if (ctx_) {
-            whisper_free(ctx_);
-            ctx_ = nullptr;
+        if (mCtx) {
+            whisper_free(mCtx);
+            mCtx = nullptr;
         }
 
         // Update language and reload model
-        current_language_ = language;
+        mCurrentLanguage = language;
         if (!initializeWhisper()) {
             std::cerr << "Error: Failed to switch to " << languageToString(language) << " model" << std::endl;
             return false;
@@ -148,9 +148,9 @@ private:
 
     std::string buildModelPath(Language language) const {
         // If using custom models, return the specific path for this language
-        if (use_custom_models_) {
-            auto it = custom_language_models_.find(language);
-            if (it != custom_language_models_.end()) {
+        if (mUseCustomModels) {
+            auto it = mCustomLanguageModels.find(language);
+            if (it != mCustomLanguageModels.end()) {
                 return it->second;
             } else {
                 throw std::runtime_error("No model configured for language: " + languageToString(language));
@@ -173,7 +173,7 @@ private:
         }
 
         // Replace .bin with language-specific suffix + .bin
-        std::string model_path = base_model_path_;
+        std::string model_path = mBaseModelPath;
         size_t bin_pos = model_path.find(".bin");
         if (bin_pos != std::string::npos) {
             model_path.replace(bin_pos, 4, lang_suffix + ".bin");
@@ -186,12 +186,12 @@ private:
 
     bool initializeWhisper() {
         // Build the language-specific model path
-        std::string model_path = buildModelPath(current_language_);
+        std::string model_path = buildModelPath(mCurrentLanguage);
 
         // Check if model file exists
         std::ifstream model_check(model_path);
         if (!model_check.good()) {
-            std::cerr << "Error: Could not find " << languageToString(current_language_)
+            std::cerr << "Error: Could not find " << languageToString(mCurrentLanguage)
                       << " model file: " << model_path << std::endl;
             return false;
         }
@@ -199,52 +199,52 @@ private:
 
         // Initialize whisper context
         struct whisper_context_params cparams = whisper_context_default_params();
-        ctx_ = whisper_init_from_file_with_params(model_path.c_str(), cparams);
+        mCtx = whisper_init_from_file_with_params(model_path.c_str(), cparams);
 
-        if (!ctx_) {
+        if (!mCtx) {
             std::cerr << "Error: Failed to initialize whisper context from " << model_path << std::endl;
             return false;
         }
 
         // Set up whisper parameters for streaming
-        params_ = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-        current_language_code_ = languageToCode(current_language_);
-        params_.language = current_language_code_.c_str();
-        params_.translate = false;
-        params_.print_realtime = false;
-        params_.print_progress = false;
-        params_.print_timestamps = false;
-        params_.print_special = false;
-        params_.no_context = false;      // Use context for sentence continuity (will be overridden per chunk)
-        params_.single_segment = false;
-        params_.suppress_blank = true;   // Suppress blank outputs
-        params_.suppress_nst = true;
+        mParams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        mCurrentLanguageCode = languageToCode(mCurrentLanguage);
+        mParams.language = mCurrentLanguageCode.c_str();
+        mParams.translate = false;
+        mParams.print_realtime = false;
+        mParams.print_progress = false;
+        mParams.print_timestamps = false;
+        mParams.print_special = false;
+        mParams.no_context = false;      // Use context for sentence continuity (will be overridden per chunk)
+        mParams.single_segment = false;
+        mParams.suppress_blank = true;   // Suppress blank outputs
+        mParams.suppress_nst = true;
 
         std::cout << "✓ WhisperBackend initialized successfully!" << std::endl;
         return true;
     }
 
     void workerLoop() {
-        while (running_) {
+        while (mRunning) {
             AudioChunk chunk;
 
             // Wait for audio data or shutdown signal
             {
-                std::unique_lock<std::mutex> lock(queue_mutex_);
-                queue_condition_.wait(lock, [this] {
-                    return !running_ || !audio_queue_.empty();
+                std::unique_lock<std::mutex> lock(mQueueMutex);
+                mQueueCondition.wait(lock, [this] {
+                    return !mRunning || !mAudioQueue.empty();
                 });
 
-                if (!running_) {
+                if (!mRunning) {
                     break;
                 }
 
-                if (audio_queue_.empty()) {
+                if (mAudioQueue.empty()) {
                     continue;
                 }
 
-                chunk = std::move(audio_queue_.front());
-                audio_queue_.pop();
+                chunk = std::move(mAudioQueue.front());
+                mAudioQueue.pop();
             }
 
             // Process the audio chunk
@@ -253,7 +253,7 @@ private:
     }
 
     void processAudioChunk(const AudioChunk& chunk) {
-        if (!ctx_) {
+        if (!mCtx) {
             return;
         }
 
@@ -269,20 +269,20 @@ private:
             // Set context behavior based on speech tag
             if (chunk.speechTag == SpeechTag::Start) {
                 // For Start tag, don't use context (fresh start)
-                params_.no_context = true;
+                mParams.no_context = true;
             } else {
                 // For Continue tags, use context to maintain sentence flow
-                params_.no_context = false;
+                mParams.no_context = false;
             }
 
-            const int result = whisper_full(ctx_, params_, chunk.audio.data(), static_cast<int>(chunk.audio.size()));
+            const int result = whisper_full(mCtx, mParams, chunk.audio.data(), static_cast<int>(chunk.audio.size()));
 
             if (result == 0) {
                 // Get transcription results
-                const int n_segments = whisper_full_n_segments(ctx_);
+                const int n_segments = whisper_full_n_segments(mCtx);
 
                 for (int i = 0; i < n_segments; ++i) {
-                    const char* text = whisper_full_get_segment_text(ctx_, i);
+                    const char* text = whisper_full_get_segment_text(mCtx, i);
 
                     if (text && strlen(text) > 0) {
                         std::string text_str(text);
@@ -300,7 +300,7 @@ private:
                 }
             } else {
                 // Error in processing
-                callback_(ResultTag::Error, "Failed to process audio chunk");
+                mCallback(ResultTag::Error, "Failed to process audio chunk");
                 return;
             }
         }
@@ -309,54 +309,54 @@ private:
         switch (chunk.speechTag) {
             case SpeechTag::Start:
                 // Clear last partial result for new speech sequence
-                last_partial_result_ = "";
+                mLastPartialResult = "";
                 // Provide partial result only if not empty
                 if (!combined_text.empty()) {
-                    last_partial_result_ = combined_text;
-                    callback_(ResultTag::Partial, combined_text);
+                    mLastPartialResult = combined_text;
+                    mCallback(ResultTag::Partial, combined_text);
                 }
                 break;
 
             case SpeechTag::Continue:
                 // Provide partial result only if not empty and different from last
-                if (!combined_text.empty() && combined_text != last_partial_result_) {
-                    last_partial_result_ = combined_text;
-                    callback_(ResultTag::Partial, combined_text);
+                if (!combined_text.empty() && combined_text != mLastPartialResult) {
+                    mLastPartialResult = combined_text;
+                    mCallback(ResultTag::Partial, combined_text);
                 }
                 break;
 
             case SpeechTag::End:
                 // Always call final callback for End tag (even if empty)
-                callback_(ResultTag::Final, combined_text);
+                mCallback(ResultTag::Final, combined_text);
                 // Clear last partial result after final
-                last_partial_result_ = "";
+                mLastPartialResult = "";
                 break;
         }
     }
 
-    std::string base_model_path_;
-    std::map<Language, std::string> custom_language_models_;
-    bool use_custom_models_;
-    Language current_language_;
-    std::string current_language_code_;
-    AsrEventCallback callback_;
-    std::atomic<bool> running_;
-    struct whisper_context* ctx_;
-    struct whisper_full_params params_;
+    std::string mBaseModelPath;
+    std::map<Language, std::string> mCustomLanguageModels;
+    bool mUseCustomModels;
+    Language mCurrentLanguage;
+    std::string mCurrentLanguageCode;
+    AsrEventCallback mCallback;
+    std::atomic<bool> mRunning;
+    struct whisper_context* mCtx;
+    struct whisper_full_params mParams;
 
     // Audio processing parameters
-    const int sample_rate_;
+    const int mSampleRate;
 
     // Worker thread and synchronization
-    std::thread worker_thread_;
-    std::mutex queue_mutex_;
-    std::condition_variable queue_condition_;
-    std::queue<AudioChunk> audio_queue_;
+    std::thread mWorkerThread;
+    std::mutex mQueueMutex;
+    std::condition_variable mQueueCondition;
+    std::queue<AudioChunk> mAudioQueue;
 
     // Note: No longer using audio accumulation - processing chunks immediately
 
     // Track last partial result to avoid duplicates
-    std::string last_partial_result_;
+    std::string mLastPartialResult;
 };
 
 // WhisperBackend public interface implementation
