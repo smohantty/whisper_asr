@@ -24,7 +24,6 @@ public:
         , callback_(std::move(callback))
         , running_(false)
         , ctx_(nullptr)
-        , processing_duration_sec_(3)  // Process in 3-second chunks
         , sample_rate_(16000)
     {
         initializeWhisper();
@@ -37,7 +36,6 @@ public:
         , callback_(std::move(callback))
         , running_(false)
         , ctx_(nullptr)
-        , processing_duration_sec_(3)  // Process in 3-second chunks
         , sample_rate_(16000)
     {
         initializeWhisper();
@@ -55,37 +53,17 @@ public:
             return;
         }
 
-        // Lock and add audio to queue
+        // Process each chunk immediately - no accumulation
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
 
-            // Handle speech tag logic
-            if (speechTag == SpeechTag::Start) {
-                // Clear any accumulated audio for a fresh start
-                accumulated_audio_.clear();
-            }
-
-            // Add new audio to accumulation buffer
-            accumulated_audio_.insert(accumulated_audio_.end(), audio.begin(), audio.end());
-
-            // Check if we have enough audio to process
-            size_t target_samples = sample_rate_ * processing_duration_sec_;
-            bool should_process = false;
-
-            if (speechTag == SpeechTag::End) {
-                // Process whatever we have when speech ends
-                should_process = !accumulated_audio_.empty();
-            } else if (accumulated_audio_.size() >= target_samples) {
-                // Process when we have enough samples
-                should_process = true;
-            }
-
-            if (should_process) {
-                // Move accumulated audio to processing queue
-                audio_queue_.push({accumulated_audio_, speechTag});
-                accumulated_audio_.clear();
-
-                // Notify worker thread
+            // Always queue the chunk for immediate processing
+            if (!audio.empty()) {
+                audio_queue_.push({audio, speechTag});
+                queue_condition_.notify_one();
+            } else if (speechTag == SpeechTag::End) {
+                // Even with empty audio, process End tag to signal completion
+                audio_queue_.push({audio, speechTag});
                 queue_condition_.notify_one();
             }
         }
@@ -235,7 +213,7 @@ private:
         params_.print_progress = false;
         params_.print_timestamps = false;
         params_.print_special = false;
-        params_.no_context = true;       // Process each chunk independently
+        params_.no_context = false;      // Use context for sentence continuity (will be overridden per chunk)
         params_.single_segment = false;
         params_.suppress_blank = true;   // Suppress blank outputs
         params_.suppress_nst = true;
@@ -273,49 +251,74 @@ private:
     }
 
     void processAudioChunk(const AudioChunk& chunk) {
-        if (!ctx_ || chunk.audio.empty()) {
+        if (!ctx_) {
             return;
         }
 
-        // Process with Whisper
-        const int result = whisper_full(ctx_, params_, chunk.audio.data(), static_cast<int>(chunk.audio.size()));
+        // Skip processing empty audio unless it's an End tag
+        if (chunk.audio.empty() && chunk.speechTag != SpeechTag::End) {
+            return;
+        }
 
-        if (result == 0) {
-            // Get transcription results
-            const int n_segments = whisper_full_n_segments(ctx_);
-            bool has_text = false;
-            std::string combined_text;
+        std::string combined_text;
 
-            for (int i = 0; i < n_segments; ++i) {
-                const char* text = whisper_full_get_segment_text(ctx_, i);
+        // Process audio if we have samples
+        if (!chunk.audio.empty()) {
+            // Set context behavior based on speech tag
+            if (chunk.speechTag == SpeechTag::Start) {
+                // For Start tag, don't use context (fresh start)
+                params_.no_context = true;
+            } else {
+                // For Continue tags, use context to maintain sentence flow
+                params_.no_context = false;
+            }
 
-                if (text && strlen(text) > 0) {
-                    std::string text_str(text);
-                    // Remove leading/trailing whitespace
-                    text_str.erase(0, text_str.find_first_not_of(" \t\n\r"));
-                    text_str.erase(text_str.find_last_not_of(" \t\n\r") + 1);
+            const int result = whisper_full(ctx_, params_, chunk.audio.data(), static_cast<int>(chunk.audio.size()));
 
-                    if (!text_str.empty()) {
-                        has_text = true;
-                        if (!combined_text.empty()) {
-                            combined_text += " ";
+            if (result == 0) {
+                // Get transcription results
+                const int n_segments = whisper_full_n_segments(ctx_);
+
+                for (int i = 0; i < n_segments; ++i) {
+                    const char* text = whisper_full_get_segment_text(ctx_, i);
+
+                    if (text && strlen(text) > 0) {
+                        std::string text_str(text);
+                        // Remove leading/trailing whitespace
+                        text_str.erase(0, text_str.find_first_not_of(" \t\n\r"));
+                        text_str.erase(text_str.find_last_not_of(" \t\n\r") + 1);
+
+                        if (!text_str.empty()) {
+                            if (!combined_text.empty()) {
+                                combined_text += " ";
+                            }
+                            combined_text += text_str;
                         }
-                        combined_text += text_str;
                     }
                 }
+            } else {
+                // Error in processing
+                callback_(ResultTag::Error, "Failed to process audio chunk");
+                return;
             }
+        }
 
-            // Call callback with results
-            if (has_text) {
-                ResultTag resultTag = (chunk.speechTag == SpeechTag::End) ? ResultTag::Final : ResultTag::Partial;
-                callback_(resultTag, combined_text);
-            } else if (chunk.speechTag == SpeechTag::End) {
-                // Even if no text, call final callback to signal end
-                callback_(ResultTag::Final, "");
-            }
-        } else {
-            // Error in processing
-            callback_(ResultTag::Error, "Failed to process audio chunk");
+        // Determine result tag and call callback
+        switch (chunk.speechTag) {
+            case SpeechTag::Start:
+                // Always provide partial result for start (even if empty)
+                callback_(ResultTag::Partial, combined_text);
+                break;
+
+            case SpeechTag::Continue:
+                // Always provide partial result for continue (even if empty)
+                callback_(ResultTag::Partial, combined_text);
+                break;
+
+            case SpeechTag::End:
+                // Always call final callback for End tag
+                callback_(ResultTag::Final, combined_text);
+                break;
         }
     }
 
@@ -330,7 +333,6 @@ private:
     struct whisper_full_params params_;
 
     // Audio processing parameters
-    const size_t processing_duration_sec_;
     const int sample_rate_;
 
     // Worker thread and synchronization
@@ -339,8 +341,7 @@ private:
     std::condition_variable queue_condition_;
     std::queue<AudioChunk> audio_queue_;
 
-    // Audio accumulation
-    std::vector<float> accumulated_audio_;
+    // Note: No longer using audio accumulation - processing chunks immediately
 };
 
 // WhisperBackend public interface implementation
