@@ -144,6 +144,15 @@ test_context_flow = executable('test_context_flow',
   install : false
 )
 
+
+# Build the debug fixed chunks application
+debug_fixed_chunks = executable('debug_fixed_chunks',
+  'debug_fixed_chunks.cpp',
+  dependencies : [whisper_dep, threads_dep],
+  link_with : whisperbackend_lib,
+  install : false
+)
+
 # Copy sample files to build directory if they exist
 # Note: Using resources directory since subproject files are sandboxed
 resources_dir = meson.current_source_dir() / 'resources'

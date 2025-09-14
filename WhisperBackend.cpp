@@ -28,6 +28,9 @@ public:
         , mLastPartialResult("")
         , mKeepSamples((mSampleRate * 200) / 1000)  // 200ms worth of samples
         , mInSpeechSequence(false)
+        , mFixedChunkMs(300)  // Internal: Fixed 300ms chunks (implementation detail)
+        , mFixedChunkSamples((mSampleRate * mFixedChunkMs) / 1000)
+        , mCurrentlyAccumulating(false)
     {
         initializeWhisper();
     }
@@ -43,6 +46,9 @@ public:
         , mLastPartialResult("")
         , mKeepSamples((mSampleRate * 200) / 1000)  // 200ms worth of samples
         , mInSpeechSequence(false)
+        , mFixedChunkMs(300)  // Internal: Fixed 300ms chunks (implementation detail)
+        , mFixedChunkSamples((mSampleRate * mFixedChunkMs) / 1000)
+        , mCurrentlyAccumulating(false)
     {
         initializeWhisper();
     }
@@ -59,19 +65,71 @@ public:
             return;
         }
 
-        // Process each chunk immediately - no accumulation
-        {
-            std::lock_guard<std::mutex> lock(mQueueMutex);
+        std::lock_guard<std::mutex> lock(mQueueMutex);
 
-            // Always queue the chunk for immediate processing
+        if (speechTag == SpeechTag::Start) {
+            // Start: Clear buffer and begin accumulating for new speech sequence
+            mChunkBuffer.clear();
+            mCurrentlyAccumulating = true;
+
+            // Add audio to buffer
             if (!audio.empty()) {
-                mAudioQueue.push({audio, speechTag});
+                mChunkBuffer.insert(mChunkBuffer.end(), audio.begin(), audio.end());
+            }
+
+            // Check if we have enough for a full chunk
+            if (static_cast<int>(mChunkBuffer.size()) >= mFixedChunkSamples) {
+                // Extract fixed chunk and queue it
+                std::vector<float> fixedChunk(mChunkBuffer.begin(), mChunkBuffer.begin() + mFixedChunkSamples);
+                mAudioQueue.push({fixedChunk, speechTag});
                 mQueueCondition.notify_one();
-            } else if (speechTag == SpeechTag::End) {
-                // Even with empty audio, process End tag to signal completion
-                mAudioQueue.push({audio, speechTag});
+
+                // Keep remainder for next chunk
+                mChunkBuffer.erase(mChunkBuffer.begin(), mChunkBuffer.begin() + mFixedChunkSamples);
+            }
+
+        } else if (speechTag == SpeechTag::Continue && mCurrentlyAccumulating) {
+            // Continue: Add to buffer and check for complete chunks
+            if (!audio.empty()) {
+                mChunkBuffer.insert(mChunkBuffer.end(), audio.begin(), audio.end());
+            }
+
+            // Process complete chunks while we have enough samples
+            while (static_cast<int>(mChunkBuffer.size()) >= mFixedChunkSamples) {
+                std::vector<float> fixedChunk(mChunkBuffer.begin(), mChunkBuffer.begin() + mFixedChunkSamples);
+                mAudioQueue.push({fixedChunk, speechTag});
+                mQueueCondition.notify_one();
+
+                // Remove processed samples
+                mChunkBuffer.erase(mChunkBuffer.begin(), mChunkBuffer.begin() + mFixedChunkSamples);
+            }
+
+        } else if (speechTag == SpeechTag::End) {
+            // End: Add final audio and pad to complete chunk with silence
+            if (!audio.empty()) {
+                mChunkBuffer.insert(mChunkBuffer.end(), audio.begin(), audio.end());
+            }
+
+            // If we have any accumulated samples, pad to fixed chunk size with silence
+            if (!mChunkBuffer.empty()) {
+                // Pad with silence to reach fixed chunk size
+                int samplesNeeded = mFixedChunkSamples - static_cast<int>(mChunkBuffer.size());
+                if (samplesNeeded > 0) {
+                    mChunkBuffer.resize(mChunkBuffer.size() + samplesNeeded, 0.0f); // Pad with silence
+                }
+
+                // Queue the padded chunk
+                mAudioQueue.push({mChunkBuffer, speechTag});
+                mQueueCondition.notify_one();
+            } else {
+                // Even with no accumulated audio, queue empty End tag for finalization
+                mAudioQueue.push({std::vector<float>(), speechTag});
                 mQueueCondition.notify_one();
             }
+
+            // Reset accumulation state
+            mChunkBuffer.clear();
+            mCurrentlyAccumulating = false;
         }
     }
 
@@ -269,70 +327,98 @@ private:
         }
 
         std::string combined_text;
-        std::vector<float> processAudio;
 
-        // Process audio if we have samples
+        // Process the fixed-size chunk (should always be mFixedChunkSamples or empty for End)
         if (!chunk.audio.empty()) {
-            // Handle speech sequence state and audio buffering
-            processAudio = prepareAudioWithContext(chunk.audio, chunk.speechTag);
-
-            // Set context behavior based on speech tag (following stream.cpp logic)
-            setupContextForSpeechTag(chunk.speechTag);
-
-            const int result = whisper_full(mCtx, mParams, processAudio.data(), static_cast<int>(processAudio.size()));
-
-            if (result == 0) {
-                // Get transcription results and update context tokens
-                combined_text = extractTextAndUpdateContext();
-            } else {
-                // Error in processing
-                mCallback(ResultTag::Error, "Failed to process audio chunk");
-                return;
-            }
+            combined_text = processFixedChunk(chunk.audio, chunk.speechTag);
         }
 
         // Handle context management and callbacks based on speech tag
         handleSpeechTagContext(chunk.speechTag, combined_text);
     }
 
-    // Helper method to prepare audio with context overlap (following stream.cpp logic)
-    std::vector<float> prepareAudioWithContext(const std::vector<float>& newAudio, SpeechTag speechTag) {
-        std::vector<float> processAudio;
+    // Helper method to process fixed-size audio chunks
+    std::string processFixedChunk(const std::vector<float>& audioData, SpeechTag speechTag) {
+        // Handle speech sequence state and audio buffering
+        const std::vector<float>& processAudio = prepareAudioWithContext(audioData, speechTag);
 
+        // Set context behavior based on speech tag (following stream.cpp logic)
+        setupContextForSpeechTag(speechTag);
+
+        const int result = whisper_full(mCtx, mParams, processAudio.data(), static_cast<int>(processAudio.size()));
+
+        if (result == 0) {
+            // Get transcription results and update context tokens
+            return extractTextAndUpdateContext();
+        } else {
+            // Error in processing
+            mCallback(ResultTag::Error, "Failed to process fixed audio chunk");
+            return "";
+        }
+    }
+
+    // Helper method to prepare audio with context overlap (following stream.cpp logic)
+    const std::vector<float>& prepareAudioWithContext(const std::vector<float>& newAudio, SpeechTag speechTag) {
         if (speechTag == SpeechTag::Start) {
             // For Start tag, clear any previous audio buffer and start fresh
             mAudioBuffer.clear();
             mInSpeechSequence = true;
-            processAudio = newAudio;
+
+            // Use pre-allocated buffer and copy data directly
+            mProcessBuffer.resize(newAudio.size());
+            std::copy(newAudio.data(), newAudio.data() + newAudio.size(), mProcessBuffer.data());
+
+            // Update audio buffer for next iteration using copy (avoid vector assignment)
+            if (mInSpeechSequence && !mProcessBuffer.empty()) {
+                mAudioBuffer.resize(mProcessBuffer.size());
+                std::copy(mProcessBuffer.data(), mProcessBuffer.data() + mProcessBuffer.size(), mAudioBuffer.data());
+            }
+
+            return mProcessBuffer;
+
         } else if (speechTag == SpeechTag::Continue && mInSpeechSequence) {
             // For Continue tag, combine overlap from previous audio with new audio
             if (!mAudioBuffer.empty()) {
-                // Take up to mKeepSamples from the end of previous audio
+                // Calculate samples to take from previous audio for overlap
                 int samples_to_take = std::min(static_cast<int>(mAudioBuffer.size()), mKeepSamples);
+                int total_samples = samples_to_take + static_cast<int>(newAudio.size());
 
-                processAudio.reserve(samples_to_take + newAudio.size());
+                // Resize pre-allocated buffer to exact size needed
+                mProcessBuffer.resize(total_samples);
 
-                // Add overlap samples from previous audio
-                auto start_it = mAudioBuffer.end() - samples_to_take;
-                processAudio.insert(processAudio.end(), start_it, mAudioBuffer.end());
+                // Copy overlap samples from previous audio (from the end)
+                const float* src_start = mAudioBuffer.data() + (mAudioBuffer.size() - samples_to_take);
+                std::copy(src_start, src_start + samples_to_take, mProcessBuffer.data());
 
-                // Add new audio
-                processAudio.insert(processAudio.end(), newAudio.begin(), newAudio.end());
+                // Copy new audio data after the overlap
+                std::copy(newAudio.data(), newAudio.data() + newAudio.size(),
+                         mProcessBuffer.data() + samples_to_take);
+
+                // Update audio buffer for next iteration using copy (avoid vector assignment)
+                mAudioBuffer.resize(mProcessBuffer.size());
+                std::copy(mProcessBuffer.data(), mProcessBuffer.data() + mProcessBuffer.size(), mAudioBuffer.data());
+
+                return mProcessBuffer;
             } else {
                 // No previous audio buffer, just use new audio
-                processAudio = newAudio;
+                mProcessBuffer.resize(newAudio.size());
+                std::copy(newAudio.data(), newAudio.data() + newAudio.size(), mProcessBuffer.data());
+
+                // Update audio buffer for next iteration using copy (avoid vector assignment)
+                if (mInSpeechSequence && !mProcessBuffer.empty()) {
+                    mAudioBuffer.resize(mProcessBuffer.size());
+                    std::copy(mProcessBuffer.data(), mProcessBuffer.data() + mProcessBuffer.size(), mAudioBuffer.data());
+                }
+
+                return mProcessBuffer;
             }
         } else {
             // For End tag or if not in speech sequence, just use new audio
-            processAudio = newAudio;
-        }
+            mProcessBuffer.resize(newAudio.size());
+            std::copy(newAudio.data(), newAudio.data() + newAudio.size(), mProcessBuffer.data());
 
-        // Update audio buffer for next iteration (only if in speech sequence)
-        if (mInSpeechSequence && !processAudio.empty()) {
-            mAudioBuffer = processAudio;
+            return mProcessBuffer;
         }
-
-        return processAudio;
     }
 
     // Setup whisper context parameters based on speech tag
@@ -436,9 +522,11 @@ private:
 
                 // Reset context after speech sequence ends
                 mPromptTokens.clear();
-                mAudioBuffer.clear();
+                mAudioBuffer.clear();  // Clear audio overlap buffer
+                mChunkBuffer.clear();  // Clear any remaining chunk buffer
                 mLastPartialResult = "";
                 mInSpeechSequence = false;
+                mCurrentlyAccumulating = false;
                 break;
         }
     }
@@ -469,9 +557,18 @@ private:
 
     // Context management (following stream.cpp approach)
     std::vector<whisper_token> mPromptTokens;  // Tokens from previous segments for context
-    std::vector<float> mAudioBuffer;           // Audio overlap buffer for continuity
+    std::vector<float> mAudioBuffer;           // Audio overlap buffer for continuity (pre-allocated)
     const int mKeepSamples;                    // Number of samples to keep for overlap (200ms worth)
     bool mInSpeechSequence;                    // Track if we're in a speech sequence (Start->Continue->End)
+
+    // Fixed chunk processing (configurable, default 300ms)
+    std::vector<float> mChunkBuffer;           // Accumulates audio to fixed chunk size
+    const int mFixedChunkMs;                   // Fixed chunk size in ms (configurable)
+    const int mFixedChunkSamples;              // Fixed chunk size in samples
+    bool mCurrentlyAccumulating;               // Track if we're accumulating for a chunk
+
+    // Pre-allocated buffer for audio processing (avoid vector creation)
+    mutable std::vector<float> mProcessBuffer; // Reusable buffer for prepareAudioWithContext
 };
 
 // WhisperBackend public interface implementation
@@ -501,6 +598,7 @@ bool WhisperBackend::setLanguage(Language language) {
     }
     return false;
 }
+
 
 // WhisperBackendBuilder implementation
 WhisperBackendBuilder::WhisperBackendBuilder()
