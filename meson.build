@@ -136,6 +136,14 @@ builder_pattern_demo = executable('builder_pattern_demo',
   install : true
 )
 
+# Build the context flow test application
+test_context_flow = executable('test_context_flow',
+  'test_context_flow.cpp',
+  dependencies : [whisper_dep, threads_dep],
+  link_with : whisperbackend_lib,
+  install : false
+)
+
 # Copy sample files to build directory if they exist
 # Note: Using resources directory since subproject files are sandboxed
 resources_dir = meson.current_source_dir() / 'resources'
