@@ -9,6 +9,8 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
+#include <map>
+#include <stdexcept>
 
 namespace asr {
 
@@ -17,6 +19,20 @@ class WhisperBackend::Impl {
 public:
     Impl(const std::string& baseModelPath, Language language, AsrEventCallback callback)
         : base_model_path_(baseModelPath)
+        , use_custom_models_(false)
+        , current_language_(language)
+        , callback_(std::move(callback))
+        , running_(false)
+        , ctx_(nullptr)
+        , processing_duration_sec_(3)  // Process in 3-second chunks
+        , sample_rate_(16000)
+    {
+        initializeWhisper();
+    }
+
+    Impl(const std::map<Language, std::string>& languageModels, Language language, AsrEventCallback callback)
+        : custom_language_models_(languageModels)
+        , use_custom_models_(true)
         , current_language_(language)
         , callback_(std::move(callback))
         , running_(false)
@@ -151,6 +167,17 @@ private:
     }
 
     std::string buildModelPath(Language language) const {
+        // If using custom models, return the specific path for this language
+        if (use_custom_models_) {
+            auto it = custom_language_models_.find(language);
+            if (it != custom_language_models_.end()) {
+                return it->second;
+            } else {
+                throw std::runtime_error("No model configured for language: " + languageToString(language));
+            }
+        }
+
+        // Use base model path with automatic suffixes
         std::string lang_suffix;
         switch (language) {
             case Language::English:
@@ -293,6 +320,8 @@ private:
     }
 
     std::string base_model_path_;
+    std::map<Language, std::string> custom_language_models_;
+    bool use_custom_models_;
     Language current_language_;
     std::string current_language_code_;
     AsrEventCallback callback_;
@@ -321,6 +350,12 @@ WhisperBackend::WhisperBackend(const std::string& baseModelPath, Language langua
     mImpl->start();
 }
 
+WhisperBackend::WhisperBackend(const WhisperBackendBuilder& builder)
+    : mImpl(std::make_unique<Impl>(builder.languageModels_, builder.initialLanguage_, builder.callback_))
+{
+    mImpl->start();
+}
+
 WhisperBackend::~WhisperBackend() = default;
 
 void WhisperBackend::processAudio(const std::vector<float>& audio, SpeechTag speechTag) {
@@ -334,6 +369,57 @@ bool WhisperBackend::setLanguage(Language language) {
         return mImpl->setLanguage(language);
     }
     return false;
+}
+
+// WhisperBackendBuilder implementation
+WhisperBackendBuilder::WhisperBackendBuilder()
+    : initialLanguage_(Language::English)
+    , hasCallback_(false)
+{
+}
+
+WhisperBackendBuilder& WhisperBackendBuilder::setCallback(AsrEventCallback callback) {
+    callback_ = std::move(callback);
+    hasCallback_ = true;
+    return *this;
+}
+
+WhisperBackendBuilder& WhisperBackendBuilder::setInitialLanguage(Language language) {
+    initialLanguage_ = language;
+    return *this;
+}
+
+WhisperBackendBuilder& WhisperBackendBuilder::setModelForLanguage(Language language, const std::string& modelPath) {
+    languageModels_[language] = modelPath;
+    return *this;
+}
+
+WhisperBackendBuilder& WhisperBackendBuilder::setBaseModelPath(const std::string& baseModelPath) {
+    // Clear any existing custom models
+    languageModels_.clear();
+
+    // Set up automatic model paths
+    languageModels_[Language::English] = baseModelPath + ".en.bin";
+    languageModels_[Language::Korean] = baseModelPath + ".bin";
+
+    return *this;
+}
+
+std::unique_ptr<WhisperBackend> WhisperBackendBuilder::build() const {
+    if (!hasCallback_) {
+        throw std::runtime_error("Callback must be set before building WhisperBackend");
+    }
+
+    if (languageModels_.empty()) {
+        throw std::runtime_error("At least one model must be configured before building WhisperBackend");
+    }
+
+    // Check that initial language has a model
+    if (languageModels_.find(initialLanguage_) == languageModels_.end()) {
+        throw std::runtime_error("No model configured for initial language");
+    }
+
+    return std::unique_ptr<WhisperBackend>(new WhisperBackend(*this));
 }
 
 } // namespace asr

@@ -6,6 +6,8 @@ The `WhisperBackend` class provides a high-level C++ API for live streaming Auto
 
 - **Live streaming ASR**: Real-time speech recognition with callback-based results
 - **Multi-language support**: Runtime switching between English and Korean models
+- **Builder pattern**: Flexible model configuration with method chaining
+- **Custom model paths**: Configure different models for each language independently
 - **Internal audio queue**: Thread-safe audio buffering for smooth processing
 - **Worker thread**: Dedicated thread for audio processing to avoid blocking the main thread
 - **Speech tag handling**: Support for speech segmentation (Start/Continue/End)
@@ -50,7 +52,9 @@ using AsrEventCallback = std::function<void(ResultTag resultTag, const std::stri
 
 ### WhisperBackend Class
 
-#### Constructor
+#### Constructors
+
+**Traditional Constructor**
 ```cpp
 WhisperBackend(const std::string& baseModelPath, Language language, AsrEventCallback asrEventCallback);
 ```
@@ -59,6 +63,14 @@ WhisperBackend(const std::string& baseModelPath, Language language, AsrEventCall
   - `language`: Initial language to use (Language::English or Language::Korean)
   - `asrEventCallback`: Function to call when transcription results are available
 - **Description**: Initializes the Whisper model for the specified language and starts the internal worker thread
+
+**Builder Constructor**
+```cpp
+WhisperBackend(const WhisperBackendBuilder& builder);
+```
+- **Parameters**:
+  - `builder`: Configured WhisperBackendBuilder instance
+- **Description**: Initializes the Whisper model using builder configuration and starts the internal worker thread
 
 #### Destructor
 ```cpp
@@ -86,9 +98,63 @@ bool setLanguage(Language language);
 - **Description**: Dynamically switches the language model by unloading the current model and loading the target language model
 - **Thread Safety**: This method is thread-safe but may temporarily pause audio processing during the switch
 
+### WhisperBackendBuilder Class
+
+The builder class provides a flexible way to configure WhisperBackend instances with custom model paths for each language.
+
+#### Constructor
+```cpp
+WhisperBackendBuilder();
+```
+- **Description**: Creates a new builder instance with default settings
+
+#### Configuration Methods
+
+**Set Callback**
+```cpp
+WhisperBackendBuilder& setCallback(AsrEventCallback callback);
+```
+- **Parameters**: `callback` - Function to call when transcription results are available
+- **Returns**: Reference to builder for method chaining
+- **Required**: Yes
+
+**Set Initial Language**
+```cpp
+WhisperBackendBuilder& setInitialLanguage(Language language);
+```
+- **Parameters**: `language` - Language to use when backend starts
+- **Returns**: Reference to builder for method chaining
+- **Default**: Language::English
+
+**Set Model for Language**
+```cpp
+WhisperBackendBuilder& setModelForLanguage(Language language, const std::string& modelPath);
+```
+- **Parameters**:
+  - `language` - Target language
+  - `modelPath` - Full path to the model file for this language
+- **Returns**: Reference to builder for method chaining
+- **Description**: Configure a specific model file for a language
+
+**Set Base Model Path**
+```cpp
+WhisperBackendBuilder& setBaseModelPath(const std::string& baseModelPath);
+```
+- **Parameters**: `baseModelPath` - Base path without language suffix
+- **Returns**: Reference to builder for method chaining
+- **Description**: Convenience method that sets both English (.en.bin) and Korean (.bin) models
+
+**Build**
+```cpp
+std::unique_ptr<WhisperBackend> build() const;
+```
+- **Returns**: Configured WhisperBackend instance
+- **Throws**: `std::runtime_error` if configuration is invalid
+- **Description**: Creates and returns the configured backend instance
+
 ## Usage Examples
 
-### Basic Usage
+### Traditional Constructor Usage
 
 ```cpp
 #include "WhisperBackend.h"
@@ -112,11 +178,8 @@ void onAsrResult(ResultTag tag, const std::string& text) {
 }
 
 int main() {
-    // Specify base model path
-    std::string baseModelPath = "resources/ggml-small";
-
-    // Create WhisperBackend with base model path, language, and callback
-    WhisperBackend backend(baseModelPath, Language::English, onAsrResult);
+    // Traditional constructor - uses automatic model path generation
+    WhisperBackend backend("resources/ggml-small", Language::English, onAsrResult);
 
     // Process audio chunks
     std::vector<float> audioChunk = getAudioFromMicrophone();
@@ -130,6 +193,55 @@ int main() {
     backend.processAudio(finalChunk, SpeechTag::End);
 
     return 0;  // Destructor automatically cleans up
+}
+```
+
+### Builder Pattern Usage
+
+```cpp
+#include "WhisperBackend.h"
+#include <iostream>
+
+using namespace asr;
+
+void onAsrResult(ResultTag tag, const std::string& text) {
+    if (tag == ResultTag::Final) {
+        std::cout << "Transcription: " << text << std::endl;
+    }
+}
+
+int main() {
+    // Example 1: Using setBaseModelPath (convenience method)
+    auto backend1 = WhisperBackendBuilder()
+        .setBaseModelPath("resources/ggml-small")      // Auto-configures both languages
+        .setInitialLanguage(Language::English)
+        .setCallback(onAsrResult)
+        .build();
+
+    // Example 2: Using setModelForLanguage (custom configuration)
+    auto backend2 = WhisperBackendBuilder()
+        .setModelForLanguage(Language::English, "resources/ggml-base.en.bin")   // Larger English model
+        .setModelForLanguage(Language::Korean, "resources/ggml-small.bin")      // Smaller Korean model
+        .setInitialLanguage(Language::English)
+        .setCallback(onAsrResult)
+        .build();
+
+    // Example 3: Mixed configuration
+    auto backend3 = WhisperBackendBuilder()
+        .setBaseModelPath("resources/ggml-small")                               // Sets both languages
+        .setModelForLanguage(Language::English, "resources/ggml-large.en.bin") // Override English with larger model
+        .setInitialLanguage(Language::Korean)                                   // Start with Korean
+        .setCallback(onAsrResult)
+        .build();
+
+    // Use any of the backends
+    std::vector<float> audioChunk = getAudioFromMicrophone();
+    backend1->processAudio(audioChunk, SpeechTag::Start);
+
+    // Language switching works the same way
+    backend1->setLanguage(Language::Korean);
+
+    return 0;
 }
 ```
 
@@ -310,17 +422,25 @@ The backend integrates with Meson build system:
 ```bash
 cd builddir
 meson compile
-./example_whisper_backend [base_model_path]  # Run the example
-# Example: ./example_whisper_backend resources/ggml-small
-# This will use resources/ggml-small.en.bin and resources/ggml-small.bin
+
+# Run examples
+./example_whisper_backend [base_model_path]    # Live audio streaming with language switching
+./language_switching_demo [base_model_path]    # Language switching demo with dummy audio
+./builder_pattern_demo                         # Builder pattern configuration demo
+
+# Examples:
+./example_whisper_backend resources/ggml-small
+./language_switching_demo resources/ggml-small
+./builder_pattern_demo
 ```
 
 ## Future Enhancements
 
 Potential improvements for the API:
 - **Additional languages**: Support for more languages beyond English and Korean
+- **Builder validation**: Enhanced validation of model file existence at build time
+- **Model caching**: Intelligent caching of loaded models for faster switching
 - **Real-time factor configuration**: Adjustable processing chunk duration
 - **Voice activity detection**: Built-in VAD for automatic speech segmentation
 - **Streaming confidence scores**: Confidence metrics for transcription quality
 - **Custom callback contexts**: User data in callback functions
-- **Model size detection**: Automatic detection of available model variants

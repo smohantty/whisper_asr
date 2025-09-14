@@ -128,6 +128,14 @@ language_switching_demo = executable('language_switching_demo',
   install : true
 )
 
+# Build the builder pattern demo application
+builder_pattern_demo = executable('builder_pattern_demo',
+  'builder_pattern_demo.cpp',
+  dependencies : [whisper_dep, threads_dep],
+  link_with : whisperbackend_lib,
+  install : true
+)
+
 # Copy sample files to build directory if they exist
 # Note: Using resources directory since subproject files are sandboxed
 resources_dir = meson.current_source_dir() / 'resources'
@@ -155,7 +163,7 @@ endif
 # Print build summary
 message('')
 message('=== Whisper Test Applications Build ===')
-message('Targets: test_whisper, livestream_asr, example_whisper_backend, language_switching_demo')
+message('Targets: test_whisper, livestream_asr, example_whisper_backend, language_switching_demo, builder_pattern_demo')
 message('Language: C++17')
 message('Build type: ' + get_option('buildtype'))
 message('Install: ' + get_option('prefix'))
@@ -166,6 +174,7 @@ message('  ./test_whisper [model_path] [audio_path]')
 message('  ./livestream_asr [model_path]')
 message('  ./example_whisper_backend [base_model_path]')
 message('  ./language_switching_demo [base_model_path]')
+message('  ./builder_pattern_demo')
 message('')
 message('Note: livestream applications require:')
 message('  - Working microphone')
@@ -176,6 +185,7 @@ message('WhisperBackend API Features:')
 message('  - Live streaming ASR with callback interface')
 message('  - Multi-language support (English/Korean)')
 message('  - Runtime language switching')
+message('  - Builder pattern for flexible model configuration')
 message('  - Internal audio queue and worker thread')
 message('  - Speech tag handling (Start/Continue/End)')
 message('  - Thread-safe audio processing')
