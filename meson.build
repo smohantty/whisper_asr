@@ -91,6 +91,20 @@ test_whisper = executable('test_whisper',
   install : true
 )
 
+# Build the AudioStreamer library
+audiostreamer_lib = static_library('audiostreamer',
+  'AudioStreamer.cpp',
+  install : false
+)
+
+# Build the livestream ASR test application
+livestream_asr = executable('livestream_asr',
+  'livestream_asr.cpp',
+  dependencies : [whisper_dep, threads_dep],
+  link_with : audiostreamer_lib,
+  install : true
+)
+
 # Copy sample files to build directory if they exist
 # Note: Using resources directory since subproject files are sandboxed
 resources_dir = meson.current_source_dir() / 'resources'
@@ -117,8 +131,8 @@ endif
 
 # Print build summary
 message('')
-message('=== Whisper Test Application Build ===')
-message('Target: test_whisper')
+message('=== Whisper Test Applications Build ===')
+message('Targets: test_whisper, livestream_asr')
 message('Language: C++17')
 message('Build type: ' + get_option('buildtype'))
 message('Install: ' + get_option('prefix'))
@@ -126,4 +140,10 @@ message('')
 message('Usage after build:')
 message('  cd builddir')
 message('  ./test_whisper [model_path] [audio_path]')
+message('  ./livestream_asr [model_path]')
+message('')
+message('Note: livestream_asr requires:')
+message('  - Working microphone')
+message('  - arecord utility (ALSA tools)')
+message('  - Model file (e.g., ggml-small.en.bin)')
 message('')
