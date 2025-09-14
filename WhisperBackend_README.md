@@ -350,13 +350,26 @@ The backend requires you to specify a base model path in the constructor. The AP
 - For English: `[base_path].en.bin` (e.g., `resources/ggml-small.en.bin`)
 - For Korean: `[base_path].bin` (e.g., `resources/ggml-small.bin`)
 
+**Quick Setup:**
+Use the provided setup script to download Korean language models:
+```bash
+# Download both English and Korean models (recommended)
+./setup_resources.sh
+
+# Download specific model sizes
+./setup_resources.sh --korean medium.en small
+
+# English-only setup
+./setup_resources.sh --english-only
+```
+
 **Example Model Structure:**
 ```
 resources/
-├── ggml-small.en.bin    # English model
-├── ggml-small.bin       # Korean/multilingual model
-├── ggml-base.en.bin     # Larger English model
-└── ggml-base.bin        # Larger Korean/multilingual model
+├── ggml-small.en.bin    # English model (~466MB)
+├── ggml-small.bin       # Korean/multilingual model (~466MB)
+├── ggml-base.en.bin     # Larger English model (~142MB)
+└── ggml-base.bin        # Larger Korean/multilingual model (~142MB)
 ```
 
 **Constructor Usage:**
@@ -365,7 +378,14 @@ resources/
 WhisperBackend backend("resources/ggml-small", Language::English, callback);
 ```
 
-You can download Whisper models from the [official repository](https://github.com/ggerganov/whisper.cpp). Both language-specific model files must exist for language switching to work properly.
+**Available Model Sizes:**
+- **tiny**: ~39MB (fastest, lowest accuracy)
+- **base**: ~142MB (balanced)
+- **small**: ~466MB (good accuracy, default)
+- **medium**: ~1.5GB (high accuracy)
+- **large**: ~2.9GB (highest accuracy, multilingual only)
+
+You can download Whisper models manually from the [official repository](https://github.com/ggerganov/whisper.cpp) or use the provided setup script for automated Korean model setup.
 
 ### Audio Parameters
 
