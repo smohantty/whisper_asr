@@ -25,6 +25,7 @@ public:
         , running_(false)
         , ctx_(nullptr)
         , sample_rate_(16000)
+        , last_partial_result_("")
     {
         initializeWhisper();
     }
@@ -37,6 +38,7 @@ public:
         , running_(false)
         , ctx_(nullptr)
         , sample_rate_(16000)
+        , last_partial_result_("")
     {
         initializeWhisper();
     }
@@ -306,18 +308,28 @@ private:
         // Determine result tag and call callback
         switch (chunk.speechTag) {
             case SpeechTag::Start:
-                // Always provide partial result for start (even if empty)
-                callback_(ResultTag::Partial, combined_text);
+                // Clear last partial result for new speech sequence
+                last_partial_result_ = "";
+                // Provide partial result only if not empty
+                if (!combined_text.empty()) {
+                    last_partial_result_ = combined_text;
+                    callback_(ResultTag::Partial, combined_text);
+                }
                 break;
 
             case SpeechTag::Continue:
-                // Always provide partial result for continue (even if empty)
-                callback_(ResultTag::Partial, combined_text);
+                // Provide partial result only if not empty and different from last
+                if (!combined_text.empty() && combined_text != last_partial_result_) {
+                    last_partial_result_ = combined_text;
+                    callback_(ResultTag::Partial, combined_text);
+                }
                 break;
 
             case SpeechTag::End:
-                // Always call final callback for End tag
+                // Always call final callback for End tag (even if empty)
                 callback_(ResultTag::Final, combined_text);
+                // Clear last partial result after final
+                last_partial_result_ = "";
                 break;
         }
     }
@@ -342,6 +354,9 @@ private:
     std::queue<AudioChunk> audio_queue_;
 
     // Note: No longer using audio accumulation - processing chunks immediately
+
+    // Track last partial result to avoid duplicates
+    std::string last_partial_result_;
 };
 
 // WhisperBackend public interface implementation
